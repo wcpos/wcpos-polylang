@@ -1,0 +1,575 @@
+<?php
+/**
+ * Main plugin class.
+ *
+ * @package WCPOS\Polylang
+ */
+
+namespace WCPOS\Polylang;
+
+use WCPOS\WooCommercePOS\Services\Settings as WCPOS_Settings;
+use WCPOS\WooCommercePOSPro\Services\Stores as WCPOS_Pro_Stores;
+use WP_Query;
+use WP_REST_Request;
+use WP_REST_Response;
+use WP_REST_Server;
+
+class Plugin {
+	public const STORE_LANGUAGE_META_KEY = '_wcpos_polylang_language';
+
+	/**
+	 * @var self|null
+	 */
+	private static $instance = null;
+
+	/**
+	 * @return self
+	 */
+	public static function instance(): self {
+		if ( null === self::$instance ) {
+			self::$instance = new self();
+		}
+
+		return self::$instance;
+	}
+
+	/**
+	 * Constructor.
+	 */
+	private function __construct() {
+		add_filter( 'woocommerce_rest_product_object_query', array( $this, 'filter_product_query' ), 20, 2 );
+		add_filter( 'woocommerce_rest_product_variation_object_query', array( $this, 'filter_product_variation_query' ), 20, 2 );
+		add_filter( 'rest_pre_dispatch', array( $this, 'maybe_intercept_fast_sync' ), 20, 3 );
+
+		// WCPOS Pro: allow saving language via stores API.
+		add_filter( 'woocommerce_pos_store_meta_fields', array( $this, 'extend_store_meta_fields' ) );
+		add_filter( 'rest_post_dispatch', array( $this, 'inject_store_language_into_responses' ), 20, 3 );
+
+		// WCPOS Pro: store-edit UI extension.
+		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_store_edit_assets' ), 20 );
+	}
+
+	/**
+	 * Apply language filtering to products query.
+	 *
+	 * @param array           $args
+	 * @param WP_REST_Request $request
+	 *
+	 * @return array
+	 */
+	public function filter_product_query( array $args, WP_REST_Request $request ): array {
+		if ( ! $this->is_wcpos_route( $request ) ) {
+			return $args;
+		}
+
+		$language = $this->resolve_request_language( $request );
+		if ( ! empty( $language ) ) {
+			$args['lang'] = $language;
+		}
+
+		return $args;
+	}
+
+	/**
+	 * Apply language filtering to product variation query.
+	 *
+	 * @param array           $args
+	 * @param WP_REST_Request $request
+	 *
+	 * @return array
+	 */
+	public function filter_product_variation_query( array $args, WP_REST_Request $request ): array {
+		if ( ! $this->is_wcpos_route( $request ) ) {
+			return $args;
+		}
+
+		$language = $this->resolve_request_language( $request );
+		if ( ! empty( $language ) ) {
+			$args['lang'] = $language;
+		}
+
+		return $args;
+	}
+
+	/**
+	 * Intercept WCPOS fast-sync requests and return language-filtered data.
+	 *
+	 * @param mixed           $result
+	 * @param WP_REST_Server  $server
+	 * @param WP_REST_Request $request
+	 *
+	 * @return mixed
+	 */
+	public function maybe_intercept_fast_sync( $result, $server, WP_REST_Request $request ) {
+		if ( null !== $result ) {
+			return $result;
+		}
+
+		$context = $this->get_fast_sync_context( $request );
+		if ( ! $context ) {
+			return $result;
+		}
+
+		$language = $this->resolve_request_language( $request );
+		if ( empty( $language ) ) {
+			return $result;
+		}
+
+		$payload = $this->query_fast_sync_payload( $context, $request, $language );
+
+		$response = rest_ensure_response( $payload );
+		if ( $response instanceof WP_REST_Response ) {
+			$response->header( 'X-WP-Total', (string) count( $payload ) );
+			$response->header( 'X-WP-TotalPages', '1' );
+		}
+
+		return $response;
+	}
+
+	/**
+	 * Extend WCPOS Pro store meta field mappings.
+	 *
+	 * @param array $fields
+	 *
+	 * @return array
+	 */
+	public function extend_store_meta_fields( array $fields ): array {
+		$fields['language'] = self::STORE_LANGUAGE_META_KEY;
+		return $fields;
+	}
+
+	/**
+	 * Inject language into WCPOS stores API responses.
+	 *
+	 * @param mixed           $result
+	 * @param WP_REST_Server  $server
+	 * @param WP_REST_Request $request
+	 *
+	 * @return mixed
+	 */
+	public function inject_store_language_into_responses( $result, $server, WP_REST_Request $request ) {
+		if ( ! ( $result instanceof WP_REST_Response ) ) {
+			return $result;
+		}
+
+		$route = $request->get_route();
+		if ( 0 !== strpos( $route, '/wcpos/v1/stores' ) ) {
+			return $result;
+		}
+
+		$data = $result->get_data();
+
+		if ( is_array( $data ) && $this->is_list_array( $data ) ) {
+			foreach ( $data as $index => $item ) {
+				if ( is_array( $item ) && isset( $item['id'] ) ) {
+					$data[ $index ]['language'] = $this->resolve_store_language( (int) $item['id'] );
+				}
+			}
+		} elseif ( is_array( $data ) && isset( $data['id'] ) ) {
+			$data['language'] = $this->resolve_store_language( (int) $data['id'] );
+		}
+
+		$result->set_data( $data );
+		return $result;
+	}
+
+	/**
+	 * Enqueue WCPOS Pro store edit extension script.
+	 *
+	 * @param string $hook_suffix
+	 */
+	public function enqueue_store_edit_assets( string $hook_suffix ): void {
+		if ( 'admin_page_wcpos-store-edit' !== $hook_suffix ) {
+			return;
+		}
+
+		if ( ! class_exists( WCPOS_Pro_Stores::class ) ) {
+			return;
+		}
+
+		$pro_store_edit_handle = 'woocommerce-pos-pro-store-edit';
+		if ( ! wp_script_is( $pro_store_edit_handle, 'enqueued' ) ) {
+			return;
+		}
+
+		wp_enqueue_script(
+			'wcpos-polylang-store-edit',
+			plugins_url( 'assets/js/store-language-section.js', dirname( __DIR__ ) . '/wcpos-polylang.php' ),
+			array( $pro_store_edit_handle, 'wp-element' ),
+			VERSION,
+			true
+		);
+
+		wp_add_inline_script(
+			'wcpos-polylang-store-edit',
+			'window.wcposPolylangStoreEdit = ' . wp_json_encode(
+				array(
+					'defaultLanguage' => $this->get_default_language(),
+					'languages'       => $this->get_polylang_languages_for_js(),
+				)
+			) . ';',
+			'before'
+		);
+	}
+
+	/**
+	 * Resolve effective language for request.
+	 *
+	 * @param WP_REST_Request $request
+	 *
+	 * @return string
+	 */
+	private function resolve_request_language( WP_REST_Request $request ): string {
+		$default_language = $this->get_default_language();
+		$store_id         = (int) $request->get_param( 'store_id' );
+
+		if ( $store_id > 0 && class_exists( WCPOS_Pro_Stores::class ) ) {
+			$authorized = WCPOS_Pro_Stores::instance()->current_user_is_authorized( $store_id );
+			if ( $authorized ) {
+				$store_language = $this->resolve_store_language( $store_id );
+				if ( ! empty( $store_language ) ) {
+					return (string) apply_filters( 'wcpos_polylang_resolved_language', $store_language, $request );
+				}
+			}
+		}
+
+		return (string) apply_filters( 'wcpos_polylang_resolved_language', $default_language, $request );
+	}
+
+	/**
+	 * Resolve store language with fallback to default language.
+	 *
+	 * @param int $store_id
+	 *
+	 * @return string
+	 */
+	private function resolve_store_language( int $store_id ): string {
+		$store_language = (string) get_post_meta( $store_id, self::STORE_LANGUAGE_META_KEY, true );
+		if ( ! empty( $store_language ) ) {
+			return $store_language;
+		}
+
+		return $this->get_default_language();
+	}
+
+	/**
+	 * Resolve Polylang default language.
+	 *
+	 * @return string
+	 */
+	private function get_default_language(): string {
+		$default_language = '';
+
+		if ( function_exists( 'pll_default_language' ) ) {
+			$default_language = (string) pll_default_language( 'slug' );
+		}
+
+		return (string) apply_filters( 'wcpos_polylang_default_language', $default_language );
+	}
+
+	/**
+	 * Build context for fast sync routes.
+	 *
+	 * @param WP_REST_Request $request
+	 *
+	 * @return array|null
+	 */
+	private function get_fast_sync_context( WP_REST_Request $request ): ?array {
+		$route = $request->get_route();
+		if ( 0 !== strpos( $route, '/wcpos/v1/' ) ) {
+			return null;
+		}
+
+		if ( -1 !== (int) $request->get_param( 'posts_per_page' ) ) {
+			return null;
+		}
+
+		$fields = $request->get_param( 'fields' );
+		if ( is_string( $fields ) ) {
+			$fields = array_map( 'trim', explode( ',', $fields ) );
+		}
+		if ( ! is_array( $fields ) ) {
+			return null;
+		}
+
+		$fields       = array_values( $fields );
+		$fields_index = array_flip( $fields );
+		$id_only      = isset( $fields_index['id'] ) && 1 === count( $fields );
+		$id_plus_date = isset( $fields_index['id'] ) && isset( $fields_index['date_modified_gmt'] ) && 2 === count( $fields );
+
+		if ( ! $id_only && ! $id_plus_date ) {
+			return null;
+		}
+
+		$context = array(
+			'post_type'            => null,
+			'parent_id'            => null,
+			'include_modified_gmt' => $id_plus_date,
+		);
+
+		if ( '/wcpos/v1/products' === $route ) {
+			$context['post_type'] = 'product';
+			return $context;
+		}
+
+		if ( '/wcpos/v1/products/variations' === $route ) {
+			$context['post_type'] = 'product_variation';
+			return $context;
+		}
+
+		if ( preg_match( '#^/wcpos/v1/products/(\d+)/variations$#', $route, $matches ) ) {
+			$context['post_type'] = 'product_variation';
+			$context['parent_id'] = (int) $matches[1];
+			return $context;
+		}
+
+		return null;
+	}
+
+	/**
+	 * Query fast-sync payload.
+	 *
+	 * @param array           $context
+	 * @param WP_REST_Request $request
+	 * @param string          $language
+	 *
+	 * @return array
+	 */
+	private function query_fast_sync_payload( array $context, WP_REST_Request $request, string $language ): array {
+		$args = array(
+			'post_type'              => $context['post_type'],
+			'post_status'            => 'publish',
+			'fields'                 => 'ids',
+			'posts_per_page'         => -1,
+			'orderby'                => 'date',
+			'order'                  => 'DESC',
+			'no_found_rows'          => true,
+			'cache_results'          => false,
+			'update_post_meta_cache' => false,
+			'update_post_term_cache' => false,
+			'suppress_filters'       => false,
+			'lang'                   => $language,
+		);
+
+		if ( ! empty( $context['parent_id'] ) ) {
+			$args['post_parent'] = (int) $context['parent_id'];
+		}
+
+		$modified_after = $request->get_param( 'modified_after' );
+		if ( is_string( $modified_after ) && ! empty( $modified_after ) ) {
+			$timestamp = strtotime( $modified_after );
+			if ( false !== $timestamp ) {
+				$args['date_query'] = array(
+					array(
+						'column' => 'post_modified_gmt',
+						'after'  => gmdate( 'Y-m-d H:i:s', $timestamp ),
+					),
+				);
+			}
+		}
+
+		$include = $request->get_param( 'wcpos_include' );
+		if ( is_array( $include ) && ! empty( $include ) ) {
+			$args['post__in'] = array_map( 'intval', $include );
+		}
+
+		$exclude = $request->get_param( 'wcpos_exclude' );
+		if ( is_array( $exclude ) && ! empty( $exclude ) ) {
+			$args['post__not_in'] = array_map( 'intval', $exclude );
+		}
+
+		if ( $this->pos_only_products_enabled() ) {
+			$online_only_ids = $this->get_online_only_ids( $context['post_type'] );
+			if ( ! empty( $online_only_ids ) ) {
+				if ( empty( $args['post__not_in'] ) ) {
+					$args['post__not_in'] = $online_only_ids;
+				} else {
+					$args['post__not_in'] = array_values( array_unique( array_merge( $args['post__not_in'], $online_only_ids ) ) );
+				}
+			}
+		}
+
+		$query = new WP_Query( $args );
+		$ids   = array_map( 'intval', $query->posts );
+
+		if ( empty( $ids ) ) {
+			return array();
+		}
+
+		if ( ! $context['include_modified_gmt'] ) {
+			return array_map(
+				static function ( int $id ): array {
+					return array( 'id' => $id );
+				},
+				$ids
+			);
+		}
+
+		$dates = $this->get_modified_dates_by_id( $ids );
+
+		$payload = array();
+		foreach ( $ids as $id ) {
+			$payload[] = array(
+				'id'                => $id,
+				'date_modified_gmt' => $this->format_wcpos_modified_gmt( $dates[ $id ] ?? '' ),
+			);
+		}
+
+		return $payload;
+	}
+
+	/**
+	 * Fetch modified dates for post IDs.
+	 *
+	 * @param int[] $ids
+	 *
+	 * @return array<int,string>
+	 */
+	private function get_modified_dates_by_id( array $ids ): array {
+		$ids = array_values( array_filter( array_map( 'intval', $ids ) ) );
+		if ( empty( $ids ) ) {
+			return array();
+		}
+
+		$dates = array();
+		$posts = get_posts(
+			array(
+				'post_type'              => 'any',
+				'post__in'               => $ids,
+				'posts_per_page'         => count( $ids ),
+				'orderby'                => 'post__in',
+				'suppress_filters'       => true,
+				'update_post_meta_cache' => false,
+				'update_post_term_cache' => false,
+			)
+		);
+
+		foreach ( $posts as $post ) {
+			$dates[ (int) $post->ID ] = (string) $post->post_modified_gmt;
+		}
+
+		return $dates;
+	}
+
+	/**
+	 * Format gmt datetime as WCPOS expects.
+	 *
+	 * @param string $value
+	 *
+	 * @return string
+	 */
+	private function format_wcpos_modified_gmt( string $value ): string {
+		if ( preg_match( '/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/', $value ) ) {
+			return (string) preg_replace( '/(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})/', '$1T$2', $value );
+		}
+
+		if ( ! empty( $value ) ) {
+			return (string) wc_rest_prepare_date_response( $value );
+		}
+
+		return '';
+	}
+
+	/**
+	 * Get WCPOS online-only IDs for products or variations.
+	 *
+	 * @param string $post_type
+	 *
+	 * @return int[]
+	 */
+	private function get_online_only_ids( string $post_type ): array {
+		if ( ! class_exists( WCPOS_Settings::class ) ) {
+			return array();
+		}
+
+		$settings = WCPOS_Settings::instance();
+		$data     = array();
+
+		if ( 'product' === $post_type ) {
+			$data = $settings->get_online_only_product_visibility_settings();
+		}
+
+		if ( 'product_variation' === $post_type ) {
+			$data = $settings->get_online_only_variations_visibility_settings();
+		}
+
+		$ids = isset( $data['ids'] ) && is_array( $data['ids'] ) ? $data['ids'] : array();
+		return array_values( array_filter( array_map( 'intval', $ids ) ) );
+	}
+
+	/**
+	 * Check if POS-only mode is enabled in WCPOS settings.
+	 *
+	 * @return bool
+	 */
+	private function pos_only_products_enabled(): bool {
+		if ( ! function_exists( 'woocommerce_pos_get_settings' ) ) {
+			return false;
+		}
+
+		return (bool) woocommerce_pos_get_settings( 'general', 'pos_only_products' );
+	}
+
+	/**
+	 * True when current request is a WCPOS endpoint.
+	 *
+	 * @param WP_REST_Request $request
+	 *
+	 * @return bool
+	 */
+	private function is_wcpos_route( WP_REST_Request $request ): bool {
+		return 0 === strpos( $request->get_route(), '/wcpos/v1/' );
+	}
+
+	/**
+	 * Build language options for store edit UI.
+	 *
+	 * @return array<int,array{value:string,label:string}>
+	 */
+	private function get_polylang_languages_for_js(): array {
+		if ( ! function_exists( 'pll_languages_list' ) ) {
+			return array();
+		}
+
+		$slugs = pll_languages_list( array( 'fields' => 'slug' ) );
+		if ( ! is_array( $slugs ) ) {
+			return array();
+		}
+
+		$options = array();
+		foreach ( $slugs as $slug ) {
+			if ( ! is_string( $slug ) || '' === $slug ) {
+				continue;
+			}
+			$options[] = array(
+				'value' => $slug,
+				'label' => $slug,
+			);
+		}
+
+		return $options;
+	}
+
+	/**
+	 * Polyfill for PHP 7.4.
+	 *
+	 * @param mixed $array
+	 *
+	 * @return bool
+	 */
+	private function is_list_array( $items ): bool {
+		if ( ! is_array( $items ) ) {
+			return false;
+		}
+
+		$expected_key = 0;
+		foreach ( $items as $key => $unused ) {
+			if ( $key !== $expected_key ) {
+				return false;
+			}
+			++$expected_key;
+		}
+
+		return true;
+	}
+}
