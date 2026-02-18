@@ -37,6 +37,7 @@ class Plugin {
 	 * Constructor.
 	 */
 	private function __construct() {
+		add_action( 'init', array( $this, 'load_textdomain' ) );
 		add_filter( 'woocommerce_rest_product_object_query', array( $this, 'filter_product_query' ), 20, 2 );
 		add_filter( 'woocommerce_rest_product_variation_object_query', array( $this, 'filter_product_variation_query' ), 20, 2 );
 		add_filter( 'rest_pre_dispatch', array( $this, 'maybe_intercept_fast_sync' ), 20, 3 );
@@ -50,6 +51,13 @@ class Plugin {
 	}
 
 	/**
+	 * Load plugin translations.
+	 */
+	public function load_textdomain(): void {
+		load_plugin_textdomain( 'wcpos-polylang', false, dirname( plugin_basename( dirname( __DIR__ ) . '/wcpos-polylang.php' ) ) . '/languages' );
+	}
+
+	/**
 	 * Apply language filtering to products query.
 	 *
 	 * @param array           $args
@@ -58,6 +66,10 @@ class Plugin {
 	 * @return array
 	 */
 	public function filter_product_query( array $args, WP_REST_Request $request ): array {
+		if ( ! $this->is_polylang_supported() ) {
+			return $args;
+		}
+
 		if ( ! $this->is_wcpos_route( $request ) ) {
 			return $args;
 		}
@@ -79,6 +91,10 @@ class Plugin {
 	 * @return array
 	 */
 	public function filter_product_variation_query( array $args, WP_REST_Request $request ): array {
+		if ( ! $this->is_polylang_supported() ) {
+			return $args;
+		}
+
 		if ( ! $this->is_wcpos_route( $request ) ) {
 			return $args;
 		}
@@ -102,6 +118,10 @@ class Plugin {
 	 */
 	public function maybe_intercept_fast_sync( $result, $server, WP_REST_Request $request ) {
 		if ( null !== $result ) {
+			return $result;
+		}
+
+		if ( ! $this->is_polylang_supported() ) {
 			return $result;
 		}
 
@@ -134,6 +154,10 @@ class Plugin {
 	 * @return array
 	 */
 	public function extend_store_meta_fields( array $fields ): array {
+		if ( ! $this->is_polylang_supported() ) {
+			return $fields;
+		}
+
 		$fields['language'] = self::STORE_LANGUAGE_META_KEY;
 		return $fields;
 	}
@@ -148,6 +172,10 @@ class Plugin {
 	 * @return mixed
 	 */
 	public function inject_store_language_into_responses( $result, $server, WP_REST_Request $request ) {
+		if ( ! $this->is_polylang_supported() ) {
+			return $result;
+		}
+
 		if ( ! ( $result instanceof WP_REST_Response ) ) {
 			return $result;
 		}
@@ -179,6 +207,10 @@ class Plugin {
 	 * @param string $hook_suffix
 	 */
 	public function enqueue_store_edit_assets( string $hook_suffix ): void {
+		if ( ! $this->is_polylang_supported() ) {
+			return;
+		}
+
 		if ( 'admin_page_wcpos-store-edit' !== $hook_suffix ) {
 			return;
 		}
@@ -192,6 +224,14 @@ class Plugin {
 			return;
 		}
 
+		$languages = $this->get_polylang_languages_for_js();
+		if ( empty( $languages ) ) {
+			return;
+		}
+
+		$default_language = $this->get_default_language();
+		$default_label    = ! empty( $default_language ) ? $default_language : __( 'site default', 'wcpos-polylang' );
+
 		wp_enqueue_script(
 			'wcpos-polylang-store-edit',
 			plugins_url( 'assets/js/store-language-section.js', dirname( __DIR__ ) . '/wcpos-polylang.php' ),
@@ -204,8 +244,20 @@ class Plugin {
 			'wcpos-polylang-store-edit',
 			'window.wcposPolylangStoreEdit = ' . wp_json_encode(
 				array(
-					'defaultLanguage' => $this->get_default_language(),
-					'languages'       => $this->get_polylang_languages_for_js(),
+					'defaultLanguage' => $default_language,
+					'languages'       => $languages,
+					'strings'         => array(
+						'sectionLabel'  => __( 'Language', 'wcpos-polylang' ),
+						'title'         => __( 'Store language', 'wcpos-polylang' ),
+						'description'   => __( 'Choose which Polylang language this store should use in WCPOS.', 'wcpos-polylang' ),
+						'help'          => __( 'Products in this store are filtered to the selected language. Leave this as default to use your site default language.', 'wcpos-polylang' ),
+						'defaultOption' => sprintf(
+							/* translators: %s: language slug. */
+							__( 'Default language (%s)', 'wcpos-polylang' ),
+							$default_label
+						),
+						'noLanguages'   => __( 'No Polylang languages found.', 'wcpos-polylang' ),
+					),
 				)
 			) . ';',
 			'before'
@@ -265,6 +317,39 @@ class Plugin {
 		}
 
 		return (string) apply_filters( 'wcpos_polylang_default_language', $default_language );
+	}
+
+	/**
+	 * Check whether Polylang is active and supported.
+	 *
+	 * @return bool
+	 */
+	private function is_polylang_supported(): bool {
+		$supported = function_exists( 'pll_default_language' ) && function_exists( 'pll_languages_list' );
+		if ( ! $supported ) {
+			return (bool) apply_filters( 'wcpos_polylang_is_supported', false );
+		}
+
+		$minimum_version = $this->get_minimum_polylang_version();
+		if ( '' !== $minimum_version ) {
+			$current_version = defined( 'POLYLANG_VERSION' ) ? (string) POLYLANG_VERSION : '';
+			if ( '' === $current_version || version_compare( $current_version, $minimum_version, '<' ) ) {
+				$supported = false;
+			}
+		}
+
+		return (bool) apply_filters( 'wcpos_polylang_is_supported', $supported );
+	}
+
+	/**
+	 * Optional minimum required Polylang version.
+	 *
+	 * Defaults to empty (no strict version gate) and can be set via filter.
+	 *
+	 * @return string
+	 */
+	private function get_minimum_polylang_version(): string {
+		return (string) apply_filters( 'wcpos_polylang_minimum_version', '' );
 	}
 
 	/**
