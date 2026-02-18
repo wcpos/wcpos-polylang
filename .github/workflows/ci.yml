@@ -35,6 +35,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare local dependency stubs
+        run: |
+          mkdir -p ../woocommerce-pos ../woocommerce-pos-pro
+
+          if [ ! -f ../woocommerce-pos/woocommerce-pos.php ]; then
+            printf '%s\n' '<?php' '/**' ' * Plugin Name: WCPOS (Stub)' ' */' > ../woocommerce-pos/woocommerce-pos.php
+          fi
+
+          if [ ! -f ../woocommerce-pos-pro/woocommerce-pos-pro.php ]; then
+            printf '%s\n' '<?php' '/**' ' * Plugin Name: WCPOS Pro (Stub)' ' */' > ../woocommerce-pos-pro/woocommerce-pos-pro.php
+          fi
+
       - name: Run tests
         run: pnpm test
 
