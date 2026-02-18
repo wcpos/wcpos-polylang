@@ -66,6 +66,10 @@ class Plugin {
 	 * @return array
 	 */
 	public function filter_product_query( array $args, WP_REST_Request $request ): array {
+		if ( ! $this->is_polylang_supported() ) {
+			return $args;
+		}
+
 		if ( ! $this->is_wcpos_route( $request ) ) {
 			return $args;
 		}
@@ -87,6 +91,10 @@ class Plugin {
 	 * @return array
 	 */
 	public function filter_product_variation_query( array $args, WP_REST_Request $request ): array {
+		if ( ! $this->is_polylang_supported() ) {
+			return $args;
+		}
+
 		if ( ! $this->is_wcpos_route( $request ) ) {
 			return $args;
 		}
@@ -110,6 +118,10 @@ class Plugin {
 	 */
 	public function maybe_intercept_fast_sync( $result, $server, WP_REST_Request $request ) {
 		if ( null !== $result ) {
+			return $result;
+		}
+
+		if ( ! $this->is_polylang_supported() ) {
 			return $result;
 		}
 
@@ -142,6 +154,10 @@ class Plugin {
 	 * @return array
 	 */
 	public function extend_store_meta_fields( array $fields ): array {
+		if ( ! $this->is_polylang_supported() ) {
+			return $fields;
+		}
+
 		$fields['language'] = self::STORE_LANGUAGE_META_KEY;
 		return $fields;
 	}
@@ -156,6 +172,10 @@ class Plugin {
 	 * @return mixed
 	 */
 	public function inject_store_language_into_responses( $result, $server, WP_REST_Request $request ) {
+		if ( ! $this->is_polylang_supported() ) {
+			return $result;
+		}
+
 		if ( ! ( $result instanceof WP_REST_Response ) ) {
 			return $result;
 		}
@@ -187,6 +207,10 @@ class Plugin {
 	 * @param string $hook_suffix
 	 */
 	public function enqueue_store_edit_assets( string $hook_suffix ): void {
+		if ( ! $this->is_polylang_supported() ) {
+			return;
+		}
+
 		if ( 'admin_page_wcpos-store-edit' !== $hook_suffix ) {
 			return;
 		}
@@ -197,10 +221,6 @@ class Plugin {
 
 		$pro_store_edit_handle = 'woocommerce-pos-pro-store-edit';
 		if ( ! wp_script_is( $pro_store_edit_handle, 'enqueued' ) ) {
-			return;
-		}
-
-		if ( ! function_exists( 'pll_languages_list' ) ) {
 			return;
 		}
 
@@ -297,6 +317,39 @@ class Plugin {
 		}
 
 		return (string) apply_filters( 'wcpos_polylang_default_language', $default_language );
+	}
+
+	/**
+	 * Check whether Polylang is active and supported.
+	 *
+	 * @return bool
+	 */
+	private function is_polylang_supported(): bool {
+		$supported = function_exists( 'pll_default_language' ) && function_exists( 'pll_languages_list' );
+		if ( ! $supported ) {
+			return (bool) apply_filters( 'wcpos_polylang_is_supported', false );
+		}
+
+		$minimum_version = $this->get_minimum_polylang_version();
+		if ( '' !== $minimum_version ) {
+			$current_version = defined( 'POLYLANG_VERSION' ) ? (string) POLYLANG_VERSION : '';
+			if ( '' === $current_version || version_compare( $current_version, $minimum_version, '<' ) ) {
+				$supported = false;
+			}
+		}
+
+		return (bool) apply_filters( 'wcpos_polylang_is_supported', $supported );
+	}
+
+	/**
+	 * Optional minimum required Polylang version.
+	 *
+	 * Defaults to empty (no strict version gate) and can be set via filter.
+	 *
+	 * @return string
+	 */
+	private function get_minimum_polylang_version(): string {
+		return (string) apply_filters( 'wcpos_polylang_minimum_version', '' );
 	}
 
 	/**

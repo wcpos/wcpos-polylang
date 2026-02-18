@@ -18,11 +18,14 @@ class Test_WCPOS_Polylang extends WP_UnitTestCase {
 			);
 		}
 
+		add_filter( 'wcpos_polylang_is_supported', '__return_true' );
 		$this->configure_polylang_languages();
 	}
 
 	public function tearDown(): void {
 		remove_all_filters( 'wcpos_polylang_default_language' );
+		remove_all_filters( 'wcpos_polylang_is_supported' );
+		remove_all_filters( 'wcpos_polylang_minimum_version' );
 		remove_all_filters( 'posts_where' );
 		remove_all_filters( 'posts_pre_query' );
 		wp_set_current_user( 0 );
@@ -109,6 +112,19 @@ class Test_WCPOS_Polylang extends WP_UnitTestCase {
 		$fields = apply_filters( 'woocommerce_pos_store_meta_fields', array() );
 		$this->assertArrayHasKey( 'language', $fields );
 		$this->assertSame( '_wcpos_polylang_language', $fields['language'] );
+	}
+
+	public function test_polylang_guard_disables_query_and_store_fields(): void {
+		add_filter( 'wcpos_polylang_is_supported', '__return_false' );
+
+		$args     = array();
+		$request  = new WP_REST_Request( 'GET', '/wcpos/v1/products' );
+		$filtered = apply_filters( 'woocommerce_rest_product_object_query', $args, $request );
+
+		$this->assertArrayNotHasKey( 'lang', $filtered );
+
+		$fields = apply_filters( 'woocommerce_pos_store_meta_fields', array() );
+		$this->assertArrayNotHasKey( 'language', $fields );
 	}
 
 	/**
