@@ -37,6 +37,7 @@ class Plugin {
 	 * Constructor.
 	 */
 	private function __construct() {
+		add_action( 'init', array( $this, 'load_textdomain' ) );
 		add_filter( 'woocommerce_rest_product_object_query', array( $this, 'filter_product_query' ), 20, 2 );
 		add_filter( 'woocommerce_rest_product_variation_object_query', array( $this, 'filter_product_variation_query' ), 20, 2 );
 		add_filter( 'rest_pre_dispatch', array( $this, 'maybe_intercept_fast_sync' ), 20, 3 );
@@ -47,6 +48,13 @@ class Plugin {
 
 		// WCPOS Pro: store-edit UI extension.
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_store_edit_assets' ), 20 );
+	}
+
+	/**
+	 * Load plugin translations.
+	 */
+	public function load_textdomain(): void {
+		load_plugin_textdomain( 'wcpos-polylang', false, dirname( plugin_basename( dirname( __DIR__ ) . '/wcpos-polylang.php' ) ) . '/languages' );
 	}
 
 	/**
@@ -192,6 +200,18 @@ class Plugin {
 			return;
 		}
 
+		if ( ! function_exists( 'pll_languages_list' ) ) {
+			return;
+		}
+
+		$languages = $this->get_polylang_languages_for_js();
+		if ( empty( $languages ) ) {
+			return;
+		}
+
+		$default_language = $this->get_default_language();
+		$default_label    = ! empty( $default_language ) ? $default_language : __( 'site default', 'wcpos-polylang' );
+
 		wp_enqueue_script(
 			'wcpos-polylang-store-edit',
 			plugins_url( 'assets/js/store-language-section.js', dirname( __DIR__ ) . '/wcpos-polylang.php' ),
@@ -204,8 +224,20 @@ class Plugin {
 			'wcpos-polylang-store-edit',
 			'window.wcposPolylangStoreEdit = ' . wp_json_encode(
 				array(
-					'defaultLanguage' => $this->get_default_language(),
-					'languages'       => $this->get_polylang_languages_for_js(),
+					'defaultLanguage' => $default_language,
+					'languages'       => $languages,
+					'strings'         => array(
+						'sectionLabel'  => __( 'Language', 'wcpos-polylang' ),
+						'title'         => __( 'Store language', 'wcpos-polylang' ),
+						'description'   => __( 'Choose which Polylang language this store should use in WCPOS.', 'wcpos-polylang' ),
+						'help'          => __( 'Products in this store are filtered to the selected language. Leave this as default to use your site default language.', 'wcpos-polylang' ),
+						'defaultOption' => sprintf(
+							/* translators: %s: language slug. */
+							__( 'Default language (%s)', 'wcpos-polylang' ),
+							$default_label
+						),
+						'noLanguages'   => __( 'No Polylang languages found.', 'wcpos-polylang' ),
+					),
 				)
 			) . ';',
 			'before'
