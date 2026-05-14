@@ -9,8 +9,8 @@ importers:
   .:
     devDependencies:
       '@wordpress/env':
-        specifier: ^11.5.0
-        version: 11.5.0(@types/node@25.7.0)
+        specifier: ^11.6.0
+        version: 11.6.0(@types/node@25.7.0)
 
 packages:
 
@@ -395,8 +395,8 @@ packages:
     resolution: {integrity: sha512-BgYZfL2ADCXKOw2wJtkM3slhHotawWkgIRRxq4wEybnZQPjvAp71SPX35xepMykTw8gXlzWcWPTY31hlbnRsDA==}
     engines: {node: 18 >=18.20 || 20 || >=22}
 
-  '@wordpress/env@11.5.0':
-    resolution: {integrity: sha512-JWtSqja0yGa5F2LM5OwFnc0d1nXRXQt6TdGne+jBU5gcRfxj4+c/Sn+fheBFDBU0xLkTsefeJqJSafQZ66F1UA==}
+  '@wordpress/env@11.6.0':
+    resolution: {integrity: sha512-dlqDSOvL92YQZ0D6qne3wIivzRpQ7IDQ0D24G5JPR+tcsS8kB4BHSo+7dtrUUuOiXBB+JmIs97fX7M1Z7Fssig==}
     engines: {node: '>=18.12.0', npm: '>=8.19.2'}
     hasBin: true
 
@@ -1908,7 +1908,7 @@ snapshots:
 
   '@wolfy1339/lru-cache@11.0.2-patch.1': {}
 
-  '@wordpress/env@11.5.0(@types/node@25.7.0)':
+  '@wordpress/env@11.6.0(@types/node@25.7.0)':
     dependencies:
       '@inquirer/prompts': 7.10.1(@types/node@25.7.0)
       '@wp-playground/cli': 3.1.30
