@@ -26,6 +26,11 @@ class Test_WCPOS_Polylang extends WP_UnitTestCase {
 	}
 
 	public function tearDown(): void {
+		unset( $_SERVER['HTTP_X_WCPOS'] );
+		global $wp;
+		if ( isset( $wp ) && isset( $wp->query_vars['wcpos'] ) ) {
+			unset( $wp->query_vars['wcpos'] );
+		}
 		remove_all_filters( 'wcpos_polylang_default_language' );
 		remove_all_filters( 'wcpos_polylang_is_supported' );
 		remove_all_filters( 'wcpos_polylang_minimum_version' );
@@ -63,6 +68,102 @@ class Test_WCPOS_Polylang extends WP_UnitTestCase {
 		$request = new WP_REST_Request( 'GET', '/wc/v3/products' );
 
 		$filtered = apply_filters( 'woocommerce_rest_product_object_query', $args, $request );
+		$this->assertArrayNotHasKey( 'lang', $filtered );
+	}
+
+	/**
+	 * v2 lane: catalogue reads are proxied internally to /wc/v3/products, so the
+	 * route is not a WCPOS route. The X-WCPOS header on the outer request is what
+	 * identifies the lane.
+	 */
+	public function test_product_query_adds_lang_for_v2_proxied_wc_route(): void {
+		$this->requires_wcpos_request_helper();
+		$this->mark_request_as_pos();
+		add_filter(
+			'wcpos_polylang_default_language',
+			static function () {
+				return 'en';
+			}
+		);
+
+		$request = new WP_REST_Request( 'GET', '/wc/v3/products' );
+
+		$filtered = apply_filters( 'woocommerce_rest_product_object_query', array(), $request );
+		$this->assertArrayHasKey( 'lang', $filtered );
+		$this->assertSame( 'en', $filtered['lang'] );
+	}
+
+	/**
+	 * v2 serialized lane: free builds a bare `GET /` request in PHP, so
+	 * get_route() is literally '/'.
+	 */
+	public function test_product_query_adds_lang_for_v2_serialized_bare_route(): void {
+		$this->requires_wcpos_request_helper();
+		$this->mark_request_as_pos();
+		add_filter(
+			'wcpos_polylang_default_language',
+			static function () {
+				return 'en';
+			}
+		);
+
+		$request = new WP_REST_Request( 'GET', '/' );
+
+		$filtered = apply_filters( 'woocommerce_rest_product_object_query', array(), $request );
+		$this->assertArrayHasKey( 'lang', $filtered );
+		$this->assertSame( 'en', $filtered['lang'] );
+	}
+
+	/**
+	 * v2 writes arrive on /wcpos/v2/push/{collection}.
+	 */
+	public function test_product_query_adds_lang_for_wcpos_v2_route(): void {
+		add_filter(
+			'wcpos_polylang_default_language',
+			static function () {
+				return 'en';
+			}
+		);
+
+		$request = new WP_REST_Request( 'POST', '/wcpos/v2/push/products' );
+
+		$filtered = apply_filters( 'woocommerce_rest_product_object_query', array(), $request );
+		$this->assertArrayHasKey( 'lang', $filtered );
+		$this->assertSame( 'en', $filtered['lang'] );
+	}
+
+	public function test_product_variation_query_adds_lang_for_v2_proxied_wc_route(): void {
+		$this->requires_wcpos_request_helper();
+		$this->mark_request_as_pos();
+		add_filter(
+			'wcpos_polylang_default_language',
+			static function () {
+				return 'en';
+			}
+		);
+
+		$request = new WP_REST_Request( 'GET', '/wc/v3/products/123/variations' );
+
+		$filtered = apply_filters( 'woocommerce_rest_product_variation_object_query', array(), $request );
+		$this->assertArrayHasKey( 'lang', $filtered );
+		$this->assertSame( 'en', $filtered['lang'] );
+	}
+
+	/**
+	 * The v2 gate must not leak into non-POS traffic: an ordinary /wc/v3 request
+	 * without the WCPOS markers stays unfiltered.
+	 */
+	public function test_product_query_does_not_add_lang_for_plain_wc_route_without_pos_markers(): void {
+		add_filter(
+			'wcpos_polylang_default_language',
+			static function () {
+				return 'en';
+			}
+		);
+
+		$request = new WP_REST_Request( 'GET', '/wc/v3/products' );
+
+		$filtered = apply_filters( 'woocommerce_rest_product_variation_object_query', array(), $request );
 		$this->assertArrayNotHasKey( 'lang', $filtered );
 	}
 
@@ -253,6 +354,22 @@ class Test_WCPOS_Polylang extends WP_UnitTestCase {
 
 		$fields = apply_filters( 'woocommerce_pos_store_meta_fields', array() );
 		$this->assertArrayNotHasKey( 'language', $fields );
+	}
+
+	/**
+	 * Skip when the free WCPOS plugin is too old to expose wcpos_request().
+	 */
+	private function requires_wcpos_request_helper(): void {
+		if ( ! function_exists( 'wcpos_request' ) ) {
+			$this->markTestSkipped( 'The free WCPOS plugin does not expose wcpos_request().' );
+		}
+	}
+
+	/**
+	 * Mark the current request as a WCPOS request, the way the POS client does.
+	 */
+	private function mark_request_as_pos(): void {
+		$_SERVER['HTTP_X_WCPOS'] = '1';
 	}
 
 	/**
